@@ -127,10 +127,7 @@ import scala.concurrent.duration._
   * @hideImplicitConversion PureOps
   * @hideImplicitConversion IdOps
   **/
-final class Stream[+F[_], +O] private (private val free: FreeC[Nothing, O, Unit]) extends AnyVal {
-
-  private[fs2] def get[F2[x] >: F[x], O2 >: O]: FreeC[F2, O2, Unit] =
-    free.asInstanceOf[FreeC[F2, O2, Unit]]
+final class Stream[+F[_], +O] private (private val free: FreeC[F, O, Unit]) extends AnyVal {
 
   /**
     * Appends `s2` to the end of this stream.
@@ -143,7 +140,7 @@ final class Stream[+F[_], +O] private (private val free: FreeC[Nothing, O, Unit]
     * If `this` stream is infinite, then the result is equivalent to `this`.
     */
   def ++[F2[x] >: F[x], O2 >: O](s2: => Stream[F2, O2]): Stream[F2, O2] =
-    Stream.fromFreeC(get[F2, O2].append(s2.get))
+    new Stream(free.append(s2))
 
   /** Appends `s2` to the end of this stream. Alias for `s1 ++ s2`. */
   def append[F2[x] >: F[x], O2 >: O](s2: => Stream[F2, O2]): Stream[F2, O2] =
@@ -1080,24 +1077,24 @@ final class Stream[+F[_], +O] private (private val free: FreeC[Nothing, O, Unit]
     * }}}
     */
   def flatMap[F2[x] >: F[x], O2](f: O => Stream[F2, O2]): Stream[F2, O2] =
-    Stream.fromFreeC[F2, O2](Algebra.uncons(get[F2, O]).flatMap {
+    Stream.fromFreeC[F2, O2](Algebra.uncons(free).flatMap {
       case Some((hd, tl)) =>
         tl match {
           case FreeC.Result.Pure(_) if hd.size == 1 =>
             // nb: If tl is Pure, there's no need to propagate flatMap through the tail. Hence, we
             // check if hd has only a single element, and if so, process it directly instead of folding.
             // This allows recursive infinite streams of the form `def s: Stream[Pure,O] = Stream(o).flatMap { _ => s }`
-            f(hd(0)).get
+            f(hd(0))
 
           case _ =>
             def go(idx: Int): FreeC[F2, O2, Unit] =
-              if (idx == hd.size) Stream.fromFreeC(tl).flatMap(f).get
+              if (idx == hd.size) new Stream(tl).flatMap(f)
               else {
-                f(hd(idx)).get.transformWith {
+                f(hd(idx)).free.transformWith {
                   case Result.Pure(_)   => go(idx + 1)
                   case Result.Fail(err) => Algebra.raiseError(err)
                   case Result.Interrupted(scopeId: Token, err) =>
-                    Stream.fromFreeC(Algebra.interruptBoundary(tl, scopeId, err)).flatMap(f).get
+                    new Stream(Algebra.interruptBoundary(tl, scopeId, err)).flatMap(f)
                   case Result.Interrupted(invalid, err) =>
                     sys.error(s"Invalid interruption context: $invalid (flatMap)")
                 }
@@ -1106,7 +1103,7 @@ final class Stream[+F[_], +O] private (private val free: FreeC[Nothing, O, Unit]
             go(0)
         }
 
-      case None => Stream.empty.get
+      case None => Stream.empty
     })
 
   /** Alias for `flatMap(_ => s2)`. */
@@ -1379,7 +1376,7 @@ final class Stream[+F[_], +O] private (private val free: FreeC[Nothing, O, Unit]
     * }}}
     */
   def handleErrorWith[F2[x] >: F[x], O2 >: O](h: Throwable => Stream[F2, O2]): Stream[F2, O2] =
-    Stream.fromFreeC(get[F2, O2].handleErrorWith(e => h(e).get[F2, O2]))
+    new Stream(free.handleErrorWith(e => h(e)))
 
   /**
     * Emits the first element of this stream (if non-empty) and then halts.
@@ -1482,7 +1479,7 @@ final class Stream[+F[_], +O] private (private val free: FreeC[Nothing, O, Unit]
             F2.guaranteeCase(
               haltWhenTrue
                 .takeWhile(!_)
-                .interruptWhen(interruptR.get.attempt)
+                .interruptWhen(interruptR.free.attempt)
                 .compile
                 .drain
             ) { c =>
@@ -1498,8 +1495,8 @@ final class Stream[+F[_], +O] private (private val free: FreeC[Nothing, O, Unit]
           Stream.bracket(F2.start(runR))(
             _ =>
               interruptR.complete(()) >>
-                doneR.get.flatMap { F2.fromEither }
-          ) >> this.interruptWhen(interruptL.get.attempt)
+                doneR.free.flatMap { F2.fromEither }
+          ) >> this.interruptWhen(interruptL.free.attempt)
 
         }
       }
@@ -1509,7 +1506,7 @@ final class Stream[+F[_], +O] private (private val free: FreeC[Nothing, O, Unit]
   def interruptWhen[F2[x] >: F[x]: Concurrent](
       haltWhenTrue: Deferred[F2, Either[Throwable, Unit]]
   ): Stream[F2, O] =
-    interruptWhen(haltWhenTrue.get)
+    interruptWhen(haltWhenTrue.free)
 
   /** Alias for `interruptWhen(haltWhenTrue.discrete)`. */
   def interruptWhen[F2[x] >: F[x]: Concurrent](haltWhenTrue: Signal[F2, Boolean]): Stream[F2, O] =
@@ -1910,9 +1907,9 @@ final class Stream[+F[_], +O] private (private val free: FreeC[Nothing, O, Unit]
   def onFinalizeCaseWeak[F2[x] >: F[x]](
       f: ExitCase[Throwable] => F2[Unit]
   )(implicit F2: Applicative[F2]): Stream[F2, O] =
-    Stream.fromFreeC(
-      Algebra.acquire[F2, O, Unit](().pure[F2], (_, ec) => f(ec)).flatMap(_ => get[F2, O])
-    )
+    Stream.fromFreeC(Algebra.acquire[F2, O, Unit](().pure[F2], (_, ec) => f(ec)).flatMap {
+      case (_, _) => get[F2, O]
+    })
 
   /**
     * Like [[Stream#evalMap]], but will evaluate effects in parallel, emitting the results
@@ -2952,7 +2949,7 @@ final class Stream[+F[_], +O] private (private val free: FreeC[Nothing, O, Unit]
 
 object Stream extends StreamLowPriority {
   @inline private[fs2] def fromFreeC[F[_], O](free: FreeC[F, O, Unit]): Stream[F, O] =
-    new Stream(free.asInstanceOf[FreeC[Nothing, O, Unit]])
+    new Stream(free)
 
   /** Creates a pure stream that emits the supplied values. To convert to an effectful stream, use `covary`. */
   def apply[F[x] >: Pure[x], O](os: O*): Stream[F, O] = emits(os)
@@ -3752,7 +3749,7 @@ object Stream extends StreamLowPriority {
   ) extends AnyVal {
 
     private def self: Stream[F, O] =
-      Stream.fromFreeC(free.asInstanceOf[FreeC[F, O, Unit]])
+      Stream.fromFreeC(free)
 
     /**
       * Waits for a chunk of elements to be available in the source stream.
@@ -4157,11 +4154,11 @@ object Stream extends StreamLowPriority {
 
   /** Projection of a `Stream` providing various ways to compile a `Stream[F,O]` to an `F[...]`. */
   final class CompileOps[F[_], G[_], O] private[Stream] (
-      private val free: FreeC[Nothing, O, Unit]
+      private val free: FreeC[F, O, Unit]
   )(implicit compiler: Compiler[F, G]) {
 
     private def self: Stream[F, O] =
-      Stream.fromFreeC(free.asInstanceOf[FreeC[F, O, Unit]])
+      Stream.fromFreeC(free)
 
     /**
       * Compiles this stream in to a value of the target effect type `F` and

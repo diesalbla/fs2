@@ -22,17 +22,17 @@ import fs2.internal._
   * `raiseError` is caught by `handleErrorWith`:
   *   - `handleErrorWith(raiseError(e))(f) == f(e)`
   */
-final class Pull[+F[_], +O, +R] private (private val free: FreeC[Nothing, O, R]) extends AnyVal {
+final class Pull[+F[_], +O, +R] private (private val free: FreeC[F, O, R]) extends AnyVal {
 
   private[fs2] def get[F2[x] >: F[x], O2 >: O, R2 >: R]: FreeC[F2, O2, R2] =
-    free.asInstanceOf[FreeC[F2, O2, R2]]
+    free
 
   /** Alias for `_.map(_ => o2)`. */
   def as[R2](r2: R2): Pull[F, O, R2] = map(_ => r2)
 
   /** Returns a pull with the result wrapped in `Right`, or an error wrapped in `Left` if the pull has failed. */
   def attempt: Pull[F, O, Either[Throwable, R]] =
-    Pull.fromFreeC(get[F, O, R].map(r => Right(r)).handleErrorWith(t => FreeC.pure(Left(t))))
+    Pull.fromFreeC(free.map(r => Right(r)).handleErrorWith(t => FreeC.pure(Left(t))))
 
   /**
     * Interpret this `Pull` to produce a `Stream`.
@@ -47,7 +47,7 @@ final class Pull[+F[_], +O, +R] private (private val free: FreeC[Nothing, O, R])
 
   /** Applies the resource of this pull to `f` and returns the result. */
   def flatMap[F2[x] >: F[x], O2 >: O, R2](f: R => Pull[F2, O2, R2]): Pull[F2, O2, R2] =
-    Pull.fromFreeC(get[F2, O2, R].flatMap(r => f(r).get))
+    Pull.fromFreeC(free.flatMap(r => f(r).get))
 
   /** Alias for `flatMap(_ => p2)`. */
   def >>[F2[x] >: F[x], O2 >: O, R2](p2: => Pull[F2, O2, R2]): Pull[F2, O2, R2] =
@@ -66,7 +66,7 @@ final class Pull[+F[_], +O, +R] private (private val free: FreeC[Nothing, O, R])
   def covaryResource[R2 >: R]: Pull[F, O, R2] = this
 
   /** Applies the resource of this pull to `f` and returns the result in a new `Pull`. */
-  def map[R2](f: R => R2): Pull[F, O, R2] = Pull.fromFreeC(get.map(f))
+  def map[F2[x] >: F[x], O2 >: O, R2](f: R => R2): Pull[F, O, R2] = Pull.fromFreeC(free.map(f))
 
   /** Applies the outputs of this pull to `f` and returns the result in a new `Pull`. */
   def mapOutput[O2](f: O => O2): Pull[F, O2, R] = Pull.mapOutput(this)(f)
@@ -88,7 +88,7 @@ final class Pull[+F[_], +O, +R] private (private val free: FreeC[Nothing, O, R])
 object Pull extends PullLowPriority {
 
   @inline private[fs2] def fromFreeC[F[_], O, R](free: FreeC[F, O, R]): Pull[F, O, R] =
-    new Pull(free.asInstanceOf[FreeC[Nothing, O, R]])
+    new Pull(free)
 
   /**
     * Like [[eval]] but if the effectful value fails, the exception is returned in a `Left`
