@@ -40,6 +40,12 @@ class StreamBenchmark {
   @Param(Array("10", "100", "1000", "10000"))
   var n: Int = _
 
+  @GenerateN(1, 10, 100, 1000, 10000, 1000000, 10000000)
+  @Benchmark
+  def rangeFold(N: Int): Option[Long] =
+    Stream.range(0, N).fold(0L)(_ + _.toLong).compile.last
+
+  @GenerateN(1, 10, 100, 1000, 10000, 100000)
   @Benchmark
   def leftAssocConcat(): Int =
     (0 until n)
